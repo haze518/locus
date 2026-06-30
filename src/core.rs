@@ -2,14 +2,37 @@ use std::{collections::VecDeque, time};
 
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 
-use crate::{LogicalReplicationMessage, codec};
+use crate::{
+    LogicalReplicationMessage,
+    protocol::{self, Codec},
+};
 
 pub enum MessageFormat {
+    Authentication(Authentication),
     CopyBothResponse(CopyBothResponse),
     CopyData(CopyData),
     ErrorResponse(ErrorResponse),
     CommandComplete(CommandComplete),
     ReadyForQuery(ReadyForQuery),
+}
+
+pub enum Authentication {
+    Ok,
+    Sasl(AuthtencationSASL),
+    SaslContinue(AuthenticationSaslContinue),
+    SaslFinal(AuthenticationSaslFinal),
+}
+
+pub struct AuthtencationSASL {
+    pub mechanisms: Vec<String>,
+}
+
+pub struct AuthenticationSaslContinue {
+    pub data: Bytes,
+}
+
+pub struct AuthenticationSaslFinal {
+    pub data: Bytes,
 }
 
 pub struct CopyBothResponse {
@@ -38,6 +61,43 @@ pub trait PgOutputMessage: Sized {
     const TAG: u8;
 
     fn parse_body(buf: &mut Bytes) -> anyhow::Result<Self>;
+}
+
+impl PgOutputMessage for Authentication {
+    const TAG: u8 = b'R';
+
+    fn parse_body(buf: &mut Bytes) -> anyhow::Result<Self> {
+        ensure_remaining(buf, 4)?;
+        let auth_code = buf.get_i32();
+
+        match auth_code {
+            0 => Ok(Self::Ok),
+
+            10 => {
+                let mut mechanisms = Vec::new();
+
+                while buf.remaining() > 0 {
+                    let mechanism = read_cstring(buf)?;
+                    if mechanism.is_empty() {
+                        break;
+                    }
+                    mechanisms.push(mechanism);
+                }
+
+                Ok(Self::Sasl(AuthtencationSASL { mechanisms }))
+            }
+
+            11 => Ok(Self::SaslContinue(AuthenticationSaslContinue {
+                data: buf.split_to(buf.remaining()),
+            })),
+
+            12 => Ok(Self::SaslFinal(AuthenticationSaslFinal {
+                data: buf.split_to(buf.remaining()),
+            })),
+
+            other => anyhow::bail!("unsupported authentication code: {other}"),
+        }
+    }
 }
 
 impl PgOutputMessage for CopyBothResponse {
@@ -199,13 +259,8 @@ enum CoreState {
     Streaming,
 }
 
-pub enum ControlAction {
-    Error,
-    Write(Bytes),
-    Wait(time::Duration),
-}
-
 pub enum CoreEvent {
+    Ready,
     LogicalMessage(LogicalReplicationMessage),
     KeepAlive(PrimaryKeepAlive),
 }
@@ -235,9 +290,13 @@ impl Core {
             | CoreState::StartReplication
             | CoreState::Streaming => return Ok(()),
             CoreState::Disconnected => {
-                let msg = codec::encode_startup_message(&params);
+                let msg = protocol::StartupMessage {
+                    user_name: params.user_name,
+                    database: params.database,
+                    replication: params.replication_mode,
+                };
                 self.connect_params = Some(params);
-                self.outgoing.push_back(msg);
+                self.outgoing.push_back(msg.encode()?);
                 self.state = CoreState::Startup;
             }
         }
@@ -281,6 +340,17 @@ impl Core {
                         self.events.push_back(CoreEvent::KeepAlive(v));
                     }
                 },
+                MessageFormat::Authentication(a) => match a {
+                    Authentication::Ok => self.events.push_back(CoreEvent::Ready),
+                    Authentication::Sasl(s) => {
+                        let msg = protocol::SASLInitialResponse {
+                            auth_mechanism: "SCRAM-SHA-256",
+                             
+                        }
+                    }
+                    Authentication::SaslContinue(s) => {}
+                    Authentication::SaslFinal(f) => {}
+                },
                 _ => continue,
             }
         }
@@ -295,6 +365,9 @@ pub fn parse(mut payload: Bytes) -> anyhow::Result<MessageFormat> {
     let mut data = payload.split_to(length - 4);
 
     match tag {
+        Authentication::TAG => {
+            Authentication::parse_body(&mut data).map(MessageFormat::Authentication)
+        }
         CopyBothResponse::TAG => {
             CopyBothResponse::parse_body(&mut data).map(MessageFormat::CopyBothResponse)
         }

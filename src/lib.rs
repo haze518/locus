@@ -1,6 +1,6 @@
-mod codec;
 mod core;
 mod driver;
+mod protocol;
 
 use bytes::{Buf, Bytes};
 

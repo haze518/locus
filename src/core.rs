@@ -1,8 +1,8 @@
-use std::collections::VecDeque;
+use std::{collections::VecDeque, time};
 
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 
-use crate::LogicalReplicationMessage;
+use crate::{LogicalReplicationMessage, codec};
 
 pub enum MessageFormat {
     CopyBothResponse(CopyBothResponse),
@@ -44,14 +44,14 @@ impl PgOutputMessage for CopyBothResponse {
     const TAG: u8 = b'W';
 
     fn parse_body(buf: &mut Bytes) -> anyhow::Result<Self> {
-        ensure_remaining(buf, 2 + 4)?;
+        ensure_remaining(buf, 2 + 2)?;
 
-        let format = CopyFormat::try_from(buf.get_u8() as u16)?;
+        let format = CopyFormat::try_from(buf.get_u16())?;
         let column_formats_len = buf.get_u16();
         let mut column_formats = Vec::with_capacity(column_formats_len as usize);
 
         for _ in 0..column_formats_len {
-            ensure_remaining(buf, 4)?;
+            ensure_remaining(buf, 2)?;
             column_formats.push(CopyFormat::try_from(buf.get_u16())?);
         }
 
@@ -190,20 +190,72 @@ fn parse_replication_message(mut payload: Bytes) -> anyhow::Result<ReplicationMe
     }
 }
 
-pub enum Event {
-    Ready,
-    ReplicationStarted,
+enum CoreState {
+    Startup,
+    Authenticating,
+    Disconnected,
+    Shutdown,
+    StartReplication,
+    Streaming,
+}
+
+pub enum ControlAction {
+    Error,
+    Write(Bytes),
+    Wait(time::Duration),
+}
+
+pub enum CoreEvent {
     LogicalMessage(LogicalReplicationMessage),
-    ServerError(String),
-    Closed,
+    KeepAlive(PrimaryKeepAlive),
+}
+
+pub struct ConnectParams {
+    pub user_name: String,
+    pub password: String,
+    pub database: String,
+    pub replication_mode: String,
 }
 
 pub struct Core {
+    state: CoreState,
+    connect_params: Option<ConnectParams>,
     data: BytesMut,
-    ready: VecDeque<LogicalReplicationMessage>,
+    events: VecDeque<CoreEvent>,
+    timeout: Option<time::Duration>,
+    outgoing: VecDeque<Bytes>,
 }
 
 impl Core {
+    pub fn desire_connect(&mut self, params: ConnectParams) -> anyhow::Result<()> {
+        match self.state {
+            CoreState::Shutdown => return anyhow::bail!("client shutdown"),
+            CoreState::Startup
+            | CoreState::Authenticating
+            | CoreState::StartReplication
+            | CoreState::Streaming => return Ok(()),
+            CoreState::Disconnected => {
+                let msg = codec::encode_startup_message(&params);
+                self.connect_params = Some(params);
+                self.outgoing.push_back(msg);
+                self.state = CoreState::Startup;
+            }
+        }
+        Ok(())
+    }
+
+    pub fn poll_write(&mut self) -> Option<Bytes> {
+        self.outgoing.pop_front()
+    }
+
+    pub fn poll_timeout(&mut self) -> Option<time::Duration> {
+        self.timeout.clone()
+    }
+
+    pub fn poll_event(&mut self) -> Option<CoreEvent> {
+        self.events.pop_front()
+    }
+
     pub fn handle(&mut self, raw: Bytes) -> anyhow::Result<()> {
         self.data.put_slice(&raw);
         loop {
@@ -223,13 +275,13 @@ impl Core {
                 MessageFormat::CopyData(d) => match parse_replication_message(d.payload)? {
                     ReplicationMessage::XlogData(v) => {
                         let lpm = crate::parse(v.wal_data)?;
-                        self.ready.push_front(lpm);
+                        self.events.push_back(CoreEvent::LogicalMessage(lpm));
                     }
                     ReplicationMessage::PrimaryKeepAlive(v) => {
-                        todo!()
+                        self.events.push_back(CoreEvent::KeepAlive(v));
                     }
                 },
-                _ => return Ok(()),
+                _ => continue,
             }
         }
     }
@@ -240,7 +292,7 @@ pub fn parse(mut payload: Bytes) -> anyhow::Result<MessageFormat> {
     let tag = payload.get_u8();
     let length = payload.get_u32() as usize;
 
-    let mut data = payload.split_to(1 + length);
+    let mut data = payload.split_to(length - 4);
 
     match tag {
         CopyBothResponse::TAG => {

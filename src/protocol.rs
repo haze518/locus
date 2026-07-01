@@ -43,9 +43,8 @@ impl Codec for StartupMessage {
 }
 
 pub(crate) struct SASLInitialResponse {
-    auth_mechanism: String,
-    data: Bytes,
-    // TODO add generate data
+    pub(crate) auth_mechanism: String,
+    pub(crate) data: Bytes,
 }
 
 impl Codec for SASLInitialResponse {
@@ -68,6 +67,22 @@ impl Codec for SASLInitialResponse {
         buf[1..5].copy_from_slice(&len.to_be_bytes());
 
         Ok(buf.freeze())
+    }
+}
+
+pub(crate) struct SASLResponse {
+    pub(crate) data: Bytes,
+}
+
+impl Codec for SASLResponse {
+    fn decode(_: Bytes) -> anyhow::Result<Self> {
+        todo!()
+    }
+    fn encode(&self) -> anyhow::Result<Bytes> {
+        let mut buf = BytesMut::new();
+        buf.put_u8(b'p');
+
+        buf.put_slice(&self.data);
     }
 }
 

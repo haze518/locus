@@ -30,6 +30,8 @@ pub enum MessageFormat {
     ErrorResponse(ErrorResponse),
     CommandComplete(CommandComplete),
     ReadyForQuery(ReadyForQuery),
+    CopyDone(CopyDone),
+    Terminate(Terminate),
 }
 
 pub enum Authentication {
@@ -193,6 +195,38 @@ impl PgOutputMessage for ReadyForQuery {
         Ok(Self {
             tx_status: buf.get_u8(),
         })
+    }
+}
+
+pub struct CopyDone;
+
+impl PgOutputMessage for CopyDone {
+    const TAG: u8 = b'c';
+
+    fn parse_body(_: &mut Bytes) -> anyhow::Result<Self> {
+        Ok(Self {})
+    }
+}
+
+fn ensure_remaining(buf: &Bytes, required: usize) -> anyhow::Result<()> {
+    if buf.remaining() < required {
+        anyhow::bail!(
+            "unexpected EOF: need {} bytes, have {}",
+            required,
+            buf.remaining()
+        );
+    }
+
+    Ok(())
+}
+
+pub struct Terminate;
+
+impl PgOutputMessage for Terminate {
+    const TAG: u8 = b'X';
+
+    fn parse_body(_: &mut Bytes) -> anyhow::Result<Self> {
+        Ok(Self {})
     }
 }
 
@@ -515,9 +549,10 @@ impl ScramClient {
 }
 
 pub enum CoreEvent {
-    Ready,
     LogicalMessage(LogicalReplicationMessage),
     KeepAlive(PrimaryKeepAlive),
+    ReplicationStarted,
+    Connected,
 }
 
 pub struct ConnectParams {
@@ -597,15 +632,22 @@ impl Core {
                 },
                 MessageFormat::CopyBothResponse(_) => {
                     self.state = CoreState::Streaming;
-                    self.events.push_back(CoreEvent::Ready);
+                    self.events.push_back(CoreEvent::ReplicationStarted);
                 }
-                MessageFormat::ReadyForQuery(_) => {
-                    self.state = CoreState::StartReplication;
-                    let msg = protocol::Query {
-                        sql: replication::start_replication("locus"),
-                    };
-                    self.outgoing.push_back(msg.encode()?);
-                }
+                MessageFormat::ReadyForQuery(_) => match &mut self.state {
+                    CoreState::Authenticating(a) => match a {
+                        AuthState::Done => {
+                            self.state = CoreState::StartReplication;
+                            let msg = protocol::Query {
+                                sql: replication::start_replication("locus"),
+                            };
+                            self.outgoing.push_back(msg.encode()?);
+                            self.events.push_back(CoreEvent::Connected);
+                        }
+                        _ => anyhow::bail!("incorrect authstate: {:?}", a),
+                    },
+                    _ => anyhow::bail!("incorrect state: {:?}", self.state),
+                },
                 MessageFormat::Authentication(a) => match a {
                     Authentication::Ok => {}
                     Authentication::Sasl(s) => {
@@ -663,6 +705,8 @@ pub fn parse(mut payload: Bytes) -> anyhow::Result<MessageFormat> {
             CopyBothResponse::parse_body(&mut data).map(MessageFormat::CopyBothResponse)
         }
         CopyData::TAG => CopyData::parse_body(&mut data).map(MessageFormat::CopyData),
+        CopyDone::TAG => CopyDone::parse_body(&mut data).map(MessageFormat::CopyDone),
+        Terminate::TAG => Terminate::parse_body(&mut data).map(MessageFormat::Terminate),
         ErrorResponse::TAG => {
             ErrorResponse::parse_body(&mut data).map(MessageFormat::ErrorResponse)
         }

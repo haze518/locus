@@ -81,8 +81,36 @@ impl Codec for SASLResponse {
     fn encode(&self) -> anyhow::Result<Bytes> {
         let mut buf = BytesMut::new();
         buf.put_u8(b'p');
+        buf.put_u32(0);
 
         buf.put_slice(&self.data);
+
+        let len = (buf.len() - 1) as u32;
+        buf[1..5].copy_from_slice(&len.to_be_bytes());
+
+        Ok(buf.freeze())
+    }
+}
+
+pub(crate) struct Query {
+    pub(crate) sql: String,
+}
+
+impl Codec for Query {
+    fn decode(_: Bytes) -> anyhow::Result<Self> {
+        todo!()
+    }
+    fn encode(&self) -> anyhow::Result<Bytes> {
+        let mut buf = BytesMut::new();
+        buf.put_u8(b'Q');
+        buf.put_u32(0);
+
+        buf.put_slice(self.sql.as_bytes());
+
+        let len = (buf.len() - 1) as u32;
+        buf[1..5].copy_from_slice(&len.to_be_bytes());
+
+        Ok(buf.freeze())
     }
 }
 

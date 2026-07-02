@@ -1,6 +1,7 @@
 mod core;
 mod driver;
 mod protocol;
+mod replication;
 
 use bytes::{Buf, Bytes};
 

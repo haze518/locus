@@ -1,7 +1,5 @@
 use bytes::{BufMut, Bytes, BytesMut};
 
-use crate::core::ConnectParams;
-
 pub(crate) trait Codec: Sized {
     fn decode(buf: Bytes) -> anyhow::Result<Self>;
     fn encode(&self) -> anyhow::Result<Bytes>;
@@ -14,7 +12,7 @@ pub(crate) struct StartupMessage {
 }
 
 impl Codec for StartupMessage {
-    fn decode(buf: Bytes) -> anyhow::Result<Self> {
+    fn decode(_: Bytes) -> anyhow::Result<Self> {
         todo!()
     }
     fn encode(&self) -> anyhow::Result<Bytes> {
@@ -48,7 +46,7 @@ pub(crate) struct SASLInitialResponse {
 }
 
 impl Codec for SASLInitialResponse {
-    fn decode(buf: Bytes) -> anyhow::Result<Self> {
+    fn decode(_: Bytes) -> anyhow::Result<Self> {
         todo!()
     }
     fn encode(&self) -> anyhow::Result<Bytes> {
@@ -101,14 +99,35 @@ impl Codec for Query {
         todo!()
     }
     fn encode(&self) -> anyhow::Result<Bytes> {
+        if self.sql.as_bytes().contains(&0) {
+            anyhow::bail!("query contains internal nul byte");
+        }
+
         let mut buf = BytesMut::new();
         buf.put_u8(b'Q');
         buf.put_u32(0);
 
         buf.put_slice(self.sql.as_bytes());
+        buf.put_u8(0);
 
         let len = (buf.len() - 1) as u32;
         buf[1..5].copy_from_slice(&len.to_be_bytes());
+
+        Ok(buf.freeze())
+    }
+}
+
+pub(crate) struct CopyDone;
+
+impl Codec for CopyDone {
+    fn decode(_: Bytes) -> anyhow::Result<Self> {
+        todo!()
+    }
+    fn encode(&self) -> anyhow::Result<Bytes> {
+        let mut buf = BytesMut::new();
+        buf.put_u8(b'c');
+
+        buf.put_u32(4);
 
         Ok(buf.freeze())
     }

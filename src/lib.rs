@@ -1,3 +1,5 @@
+mod auth;
+mod backend;
 mod core;
 mod driver;
 mod protocol;

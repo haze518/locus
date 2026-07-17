@@ -1,4 +1,4 @@
-use std::{collections::VecDeque, time};
+use std::{collections::VecDeque, net::SocketAddr, time};
 
 use bytes::{BufMut, Bytes, BytesMut};
 
@@ -44,6 +44,7 @@ pub struct ConnectParams {
     pub password: String,
     pub database: String,
     pub replication_mode: String,
+    pub address: SocketAddr,
 }
 
 pub struct Core {

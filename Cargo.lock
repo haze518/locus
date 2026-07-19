@@ -98,6 +98,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "futures-core"
+version = "0.3.33"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2cd50c473c80f6d7c3670a752354b8e569b1a7cbfdc0419ec88e5edad85e0dc7"
+
+[[package]]
 name = "getrandom"
 version = "0.4.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -140,6 +146,7 @@ dependencies = [
  "anyhow",
  "base64",
  "bytes",
+ "futures-core",
  "hmac",
  "pbkdf2",
  "rand",
